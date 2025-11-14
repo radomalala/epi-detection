@@ -1,0 +1,586 @@
+# Workflow to populate the repository with the full MVP scaffold.
+# Usage:
+# 1) Create a repository secret named REPO_WRITE_TOKEN (a PAT with repo scope).
+# 2) Add this workflow file in the repo (via GitHub UI: Add file → Create new file).
+# 3) In Actions → "Populate scaffold (manual)" → Run workflow.
+#
+# The workflow will:
+# - Checkout the repo
+# - Create the scaffold files (backend/, frontend/, docker-compose, docs, CI)
+# - Commit and push them to the main branch using the provided PAT secret
+#
+# Note: The workflow writes files using heredocs. Review the generated files after the run.
+name: Populate scaffold (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  populate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Git user
+        run: |
+          git config user.name "repo-bot"
+          git config user.email "repo-bot@example.com"
+
+      - name: Create scaffold files
+        run: |
+          set -e
+
+          # Root files
+          cat > README.md <<'EOF'
+Detection EPI — MVP
+
+Résumé
+- MVP pour détection et gestion des non-conformités EPI (casque/gilet).
+- Composants inclus : backend Node.js (Express), frontend React (Vite), Postgres (métadonnées), MinIO (stockage S3-compatible), Docker Compose pour dev.
+
+Prérequis
+- Docker & docker-compose
+- Node.js v18+ (pour dev local)
+- Une clé AWS S3 ou MinIO (fournie via variables d'env)
+
+Quickstart (dev)
+1. Copier .env.example → .env et adapter les valeurs.
+2. Lancer infra + services :
+   docker-compose up --build
+3. Backend : http://localhost:4000
+4. Frontend : http://localhost:3000
+
+Principales routes API (MVP)
+- POST /api/cameras : enregistrer caméra
+- GET  /api/cameras : lister cameras
+- POST /api/incidents : créer incident (appelé par le rule-engine)
+- GET  /api/incidents : lister incidents (filtres basiques)
+- POST /api/alerts/test : envoyer alerte test
+
+Architecture MVP
+- Ingestion RTSP : non implémenté (stub). Un service d’ingestion lira frames, appellera le modèle d’IA et POSTera des incidents.
+- Modèle IA : placeholder — intégrer YOLOv5/YOLOv8 via service d’inférence (edge/cloud).
+- Stockage médias : MinIO pour dev (S3 API).
+
+Variables d’environnement (extrait)
+- DATABASE_URL=postgres://epi:epi_pass@db:5432/epidb
+- S3_ENDPOINT=http://minio:9000
+- S3_BUCKET=epimedia
+- S3_ACCESS_KEY / S3_SECRET_KEY
+- JWT_SECRET (pour auth future)
+
+Prochaines étapes recommandées
+1. Implémenter service d’ingestion RTSP (edge/worker) et le connecter au modèle IA.
+2. Intégrer modèle IA (YOLOv8 ONNX/TensorRT) et renvoyer détections via API ou Kafka.
+3. Ajouter authentification (OIDC/SSO) + RBAC.
+4. Ajouter pages admin (zones, règles) et stockage clips (FFmpeg pour clip extraction).
+5. Metriques & monitoring (Prometheus/Grafana) + Sentry/ELK
+
+Livrables créés automatiquement par ce workflow :
+- backend/ (Express API, Dockerfile, src/)
+- frontend/ (React Vite app)
+- docker-compose.yml et .env.example
+- .github/workflows/ci.yml (CI for build & lint)
+- backend/sql/schema.sql
+EOF
+
+          cat > .env.example <<'EOF'
+# Database
+DATABASE_URL=postgres://epi:epi_pass@db:5432/epidb
+
+# S3 / MinIO
+S3_ENDPOINT=http://minio:9000
+S3_BUCKET=epimedia
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_FORCE_PATH_STYLE=true
+
+# App
+PORT=4000
+JWT_SECRET=change_me
+
+# Frontend
+VITE_API_URL=http://localhost:4000/api
+EOF
+
+          cat > docker-compose.yml <<'EOF'
+version: "3.8"
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: epi
+      POSTGRES_PASSWORD: epi_pass
+      POSTGRES_DB: epidb
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+
+  backend:
+    build: ./backend
+    env_file: .env
+    depends_on:
+      - db
+      - minio
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./backend:/usr/src/app
+    command: sh -c "npm run dev"
+
+  frontend:
+    build: ./frontend
+    env_file: .env
+    ports:
+      - "3000:5173"
+    volumes:
+      - ./frontend:/usr/src/app
+    command: sh -c "npm run dev"
+
+volumes:
+  db-data:
+  minio-data:
+EOF
+
+          # GitHub Actions CI file
+          mkdir -p .github/workflows
+          cat > .github/workflows/ci.yml <<'EOF'
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - run: npm ci
+      - run: npm run lint || true
+      - run: npm test
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - run: npm ci
+      - run: npm run build
+EOF
+
+          # Backend scaffold
+          mkdir -p backend/src/routes backend/src/models backend/src/services backend/sql
+          cat > backend/Dockerfile <<'EOF'
+FROM node:18-alpine
+WORKDIR /usr/src/app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+EXPOSE 4000
+CMD ["npm", "run", "start"]
+EOF
+
+          cat > backend/package.json <<'EOF'
+{
+  "name": "epi-backend",
+  "version": "0.1.0",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon --watch src --ext js --exec node src/index.js",
+    "lint": "eslint .",
+    "test": "echo \"no tests yet\" && exit 0"
+  },
+  "dependencies": {
+    "aws-sdk": "^2.1360.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "pg": "^8.11.0",
+    "socket.io": "^4.7.2",
+    "uuid": "^9.0.0",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22",
+    "eslint": "^8.44.0"
+  }
+}
+EOF
+
+          cat > backend/src/index.js <<'EOF'
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+require('dotenv').config();
+
+const camerasRouter = require('./routes/cameras');
+const incidentsRouter = require('./routes/incidents');
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+app.use('/api/cameras', camerasRouter);
+app.use('/api/incidents', incidentsRouter);
+
+// Health
+app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+const port = process.env.PORT || 4000;
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+// Simple real-time broadcast: incidents
+io.on('connection', (socket) => {
+  console.log('socket connected', socket.id);
+});
+
+app.set('io', io);
+
+server.listen(port, () => {
+  console.log(`Backend listening on ${port}`);
+});
+EOF
+
+          cat > backend/src/models/db.js <<'EOF'
+const { Pool } = require('pg');
+require('dotenv').config();
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL
+});
+
+module.exports = {
+  query: (text, params) => pool.query(text, params),
+  pool
+};
+EOF
+
+          cat > backend/src/services/storage.js <<'EOF'
+const AWS = require('aws-sdk');
+require('dotenv').config();
+
+const s3 = new AWS.S3({
+  endpoint: process.env.S3_ENDPOINT,
+  accessKeyId: process.env.S3_ACCESS_KEY,
+  secretAccessKey: process.env.S3_SECRET_KEY,
+  s3ForcePathStyle: process.env.S3_FORCE_PATH_STYLE === 'true'
+});
+
+const bucket = process.env.S3_BUCKET || 'epimedia';
+
+async function uploadBuffer(key, buffer, contentType) {
+  await s3.putObject({
+    Bucket: bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType
+  }).promise();
+  return `${process.env.S3_ENDPOINT}/${bucket}/${key}`;
+}
+
+module.exports = { uploadBuffer };
+EOF
+
+          cat > backend/src/routes/cameras.js <<'EOF'
+const express = require('express');
+const db = require('../models/db');
+const router = express.Router();
+const { v4: uuidv4 } = require('uuid');
+
+/**
+ * POST /api/cameras
+ * body: { name, rtsp_url, site_id }
+ */
+router.post('/', async (req, res) => {
+  const { name, rtsp_url, site_id } = req.body;
+  const id = uuidv4();
+  try {
+    await db.query(
+      'INSERT INTO cameras(id, name, rtsp_url, status, site_id, created_at) VALUES($1,$2,$3,$4,$5,NOW())',
+      [id, name, rtsp_url, 'unknown', site_id]
+    );
+    res.status(201).json({ id, name, rtsp_url, site_id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
+router.get('/', async (req, res) => {
+  try {
+    const result = await db.query('SELECT id, name, rtsp_url, status, site_id FROM cameras ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
+module.exports = router;
+EOF
+
+          cat > backend/src/routes/incidents.js <<'EOF'
+const express = require('express');
+const db = require('../models/db');
+const router = express.Router();
+const { v4: uuidv4 } = require('uuid');
+
+/**
+ * POST /api/incidents
+ * Body: { camera_id, zone_id, type, confidence, image_key, video_key, detections }
+ * This endpoint would be called by the rule-engine (or ingestion service) when a non-conformity is detected.
+ */
+router.post('/', async (req, res) => {
+  const { camera_id, zone_id, type, confidence, image_key, video_key, detections } = req.body;
+  const id = uuidv4();
+  try {
+    await db.query(
+      `INSERT INTO events(id, timestamp, camera_id, zone_id, type, confidence, image_path, video_path, resolved)
+       VALUES($1, NOW(), $2, $3, $4, $5, $6, $7, false)`,
+      [id, camera_id, zone_id, type, confidence, image_key || null, video_key || null]
+    );
+
+    // emit realtime
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('incident', { id, camera_id, zone_id, type, confidence, image_path: image_key });
+    }
+    res.status(201).json({ id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
+router.get('/', async (req, res) => {
+  const { camera_id, since } = req.query;
+  const conditions = [];
+  const params = [];
+  if (camera_id) { params.push(camera_id); conditions.push(`camera_id = $${params.length}`); }
+  if (since) { params.push(since); conditions.push(`timestamp >= $${params.length}`); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  try {
+    const result = await db.query(`SELECT * FROM events ${where} ORDER BY timestamp DESC LIMIT 200`, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'db_error' });
+  }
+});
+
+module.exports = router;
+EOF
+
+          cat > backend/sql/schema.sql <<'EOF'
+-- Minimal DB schema for MVP
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE IF NOT EXISTS cameras (
+  id UUID PRIMARY KEY,
+  name TEXT,
+  rtsp_url TEXT,
+  status TEXT,
+  site_id TEXT,
+  created_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS zones (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  camera_id UUID REFERENCES cameras(id),
+  polygon_coords JSONB,
+  ppe_required TEXT[],
+  sensitivity INTEGER DEFAULT 5
+);
+
+CREATE TABLE IF NOT EXISTS events (
+  id UUID PRIMARY KEY,
+  timestamp TIMESTAMP,
+  camera_id UUID REFERENCES cameras(id),
+  zone_id UUID,
+  type TEXT,
+  confidence REAL,
+  image_path TEXT,
+  video_path TEXT,
+  resolved BOOLEAN DEFAULT false,
+  resolved_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT,
+  role TEXT,
+  email TEXT
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID,
+  action TEXT,
+  target_id TEXT,
+  timestamp TIMESTAMP DEFAULT NOW()
+);
+EOF
+
+          # Frontend scaffold
+          mkdir -p frontend/src
+          cat > frontend/Dockerfile <<'EOF'
+FROM node:18-alpine
+WORKDIR /usr/src/app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+EXPOSE 5173
+CMD ["npm", "run", "dev"]
+EOF
+
+          cat > frontend/package.json <<'EOF'
+{
+  "name": "epi-frontend",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "socket.io-client": "^4.7.2"
+  },
+  "devDependencies": {
+    "vite": "^5.2.0"
+  }
+}
+EOF
+
+          cat > frontend/index.html <<'EOF'
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Detection EPI - Dashboard</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+EOF
+
+          cat > frontend/src/main.jsx <<'EOF'
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+
+createRoot(document.getElementById('root')).render(<App />);
+EOF
+
+          cat > frontend/src/App.jsx <<'EOF'
+import React, { useEffect, useState } from 'react';
+import { io } from 'socket.io-client';
+
+const API = import.meta.env.VITE_API_URL || 'http://localhost:4000/api';
+const socket = io('http://localhost:4000');
+
+export default function App() {
+  const [incidents, setIncidents] = useState([]);
+
+  useEffect(() => {
+    fetch(`${API}/incidents`)
+      .then(r => r.json())
+      .then(setIncidents)
+      .catch(console.error);
+
+    socket.on('incident', (data) => {
+      setIncidents(prev => [data, ...prev]);
+    });
+
+    return () => socket.disconnect();
+  }, []);
+
+  return (
+    <div style={{ padding: 20, fontFamily: 'Arial' }}>
+      <h1>Dashboard Detection EPI (MVP)</h1>
+      <section>
+        <h2>Incidents récents</h2>
+        {incidents.length === 0 && <p>Aucun incident</p>}
+        <ul>
+          {incidents.slice(0, 50).map((it) => (
+            <li key={it.id}>
+              <strong>{it.type}</strong> — cam:{it.camera_id} — conf:{(it.confidence||0).toFixed(2)}
+              {it.image_path && <div><img src={it.image_path} alt="thumb" style={{maxWidth:200}} /></div>}
+            </li>
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
+}
+EOF
+
+          # .gitignore
+          cat > .gitignore <<'EOF'
+node_modules/
+.env
+dist/
+.vscode/
+.DS_Store
+EOF
+
+          echo "Files created"
+          git add -A
+          git commit -m "Add initial scaffold (generated by workflow)" || echo "no changes to commit"
+
+      - name: Push changes to main using PAT
+        env:
+          REPO_TOKEN: ${{ secrets.REPO_WRITE_TOKEN }}
+        run: |
+          set -e
+          # Configure remote to use PAT for push
+          git remote set-url origin https://x-access-token:${REPO_TOKEN}@github.com/${{ github.repository }}.git
+          # Push to main (create if not exists)
+          git push origin HEAD:main --force
+
+      - name: Success message
+        run: |
+          echo "Scaffold pushed to main"
